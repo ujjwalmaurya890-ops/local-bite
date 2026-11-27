@@ -19,6 +19,7 @@ import type {
   Vendor,
 } from '../types';
 import { api, setAuthToken } from '../services/apiClient';
+import { getAllowedOrderTransitions } from '../utils/orderRules';
 
 interface VendorRegistrationInitial {
   shop_name?: string;
@@ -99,8 +100,10 @@ export const VendorPortal: React.FC<VendorPortalProps> = ({
   const [adminBootstrap, setAdminBootstrap] = useState<{
     is_configured: boolean;
     requires_claim: boolean;
+    bootstrap_available: boolean;
   } | null>(null);
   const [adminPasscode, setAdminPasscode] = useState('');
+  const [adminBootstrapToken, setAdminBootstrapToken] = useState('');
   const [adminVendors, setAdminVendors] = useState<Vendor[]>([]);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -253,7 +256,7 @@ export const VendorPortal: React.FC<VendorPortalProps> = ({
     setStatusError(null);
     try {
       const res = adminBootstrap?.requires_claim
-        ? await api.claimAdmin(adminPasscode)
+        ? await api.claimAdmin(adminPasscode, adminBootstrapToken)
         : await api.loginAdmin(adminPasscode);
       setAuthToken(res.token);
       onAuthChange(res.user);
@@ -874,20 +877,31 @@ export const VendorPortal: React.FC<VendorPortalProps> = ({
                             aria-label={`Update status for order ${o.order_id}`}
                             value={o.status}
                             onChange={async (e) => {
-                              await api.updateOrderStatus(
-                                o.order_id,
-                                e.target.value as OrderStatus
-                              );
-                              await loadDashboard();
+                              try {
+                                await api.updateOrderStatus(
+                                  o.order_id,
+                                  e.target.value as OrderStatus
+                                );
+                                await loadDashboard();
+                              } catch (err) {
+                                setStatusError(err instanceof Error ? err.message : 'Unable to update order status');
+                              }
                             }}
                             className="px-2.5 py-1.5 rounded-lg bg-white border border-[#292929]/15 font-medium"
                           >
-                            <option value="placed">Placed</option>
-                            <option value="accepted">Accepted</option>
-                            <option value="preparing">Preparing</option>
-                            <option value="ready">Ready</option>
-                            <option value="out_for_delivery">Out for Delivery</option>
-                            <option value="completed">Completed</option>
+                            {[
+                              { status: 'placed' as const, label: 'Placed' },
+                              { status: 'accepted' as const, label: 'Accepted' },
+                              { status: 'preparing' as const, label: 'Preparing' },
+                              { status: 'ready' as const, label: 'Ready' },
+                              { status: 'out_for_delivery' as const, label: 'Out for Delivery' },
+                              { status: 'completed' as const, label: 'Completed' },
+                              { status: 'cancelled' as const, label: 'Cancelled' },
+                            ]
+                              .filter((option) => option.status === o.status || getAllowedOrderTransitions(o.status).includes(option.status))
+                              .map((option) => (
+                                <option key={option.status} value={option.status}>{option.label}</option>
+                              ))}
                           </select>
                         </div>
                       ))
@@ -942,34 +956,54 @@ export const VendorPortal: React.FC<VendorPortalProps> = ({
               </div>
               <p className="text-xs text-[#292929]/75 leading-relaxed">
                 {adminBootstrap?.requires_claim
-                  ? 'No admin passcode is configured yet. Choose a passcode (min 6 characters) to claim moderation access.'
-                  : 'Enter your configured admin passcode to review pending vendor applications.'}
+                  ? 'Use the server-configured bootstrap token to create the first admin passcode. Choose a strong passcode of at least 12 characters.'
+                  : adminBootstrap?.is_configured
+                    ? 'Enter the configured admin passcode to review pending vendor applications.'
+                    : 'Admin setup is disabled. An operator must configure ADMIN_PASSCODE or ADMIN_BOOTSTRAP_TOKEN on the server.'}
               </p>
-              <form onSubmit={handleAdminAuth} className="space-y-3">
-                <div>
-                  <label htmlFor="admin-passcode" className="block text-xs font-medium mb-1">
-                    Admin Passcode
-                  </label>
-                  <input
-                    id="admin-passcode"
-                    type="password"
-                    required
-                    minLength={6}
-                    value={adminPasscode}
-                    onChange={(e) => setAdminPasscode(e.target.value)}
-                    placeholder="Enter admin passcode"
-                    className="w-full px-3 py-2.5 rounded-xl bg-[#FFF8EF] border border-[#292929]/12 text-sm"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="w-full min-h-[44px] rounded-xl bg-[#245C46] text-white text-xs font-semibold cursor-pointer"
-                >
-                  {adminBootstrap?.requires_claim
-                    ? 'Claim Admin Moderation Access'
-                    : 'Unlock Verification Queue'}
-                </button>
-              </form>
+              {(adminBootstrap?.requires_claim || adminBootstrap?.is_configured) && (
+                <form onSubmit={handleAdminAuth} className="space-y-3">
+                  {adminBootstrap?.requires_claim && (
+                    <div>
+                      <label htmlFor="admin-bootstrap-token" className="block text-xs font-medium mb-1">
+                        One-time Bootstrap Token
+                      </label>
+                      <input
+                        id="admin-bootstrap-token"
+                        type="password"
+                        required
+                        value={adminBootstrapToken}
+                        onChange={(e) => setAdminBootstrapToken(e.target.value)}
+                        placeholder="Provided by the server operator"
+                        className="w-full px-3 py-2.5 rounded-xl bg-[#FFF8EF] border border-[#292929]/12 text-sm"
+                      />
+                    </div>
+                  )}
+                  <div>
+                    <label htmlFor="admin-passcode" className="block text-xs font-medium mb-1">
+                      Admin Passcode
+                    </label>
+                    <input
+                      id="admin-passcode"
+                      type="password"
+                      required
+                      minLength={adminBootstrap?.requires_claim ? 12 : 1}
+                      value={adminPasscode}
+                      onChange={(e) => setAdminPasscode(e.target.value)}
+                      placeholder={adminBootstrap?.requires_claim ? 'At least 12 characters' : 'Enter admin passcode'}
+                      className="w-full px-3 py-2.5 rounded-xl bg-[#FFF8EF] border border-[#292929]/12 text-sm"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="w-full min-h-[44px] rounded-xl bg-[#245C46] text-white text-xs font-semibold cursor-pointer"
+                  >
+                    {adminBootstrap?.requires_claim
+                      ? 'Claim Admin Moderation Access'
+                      : 'Unlock Verification Queue'}
+                  </button>
+                </form>
+              )}
             </div>
           ) : adminVendors.length === 0 ? (
             <div className="p-8 rounded-2xl bg-white border border-[#292929]/10 text-center space-y-2">

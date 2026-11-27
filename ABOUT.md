@@ -38,7 +38,7 @@ LocalBite is a two-sided, location-first web app.
 
 **For the verifier (admin)**
 
-1. Claim the admin passcode on first run (or supply it via environment).
+1. Configure a fixed admin passcode, or claim one using a one-time server-configured bootstrap token.
 2. Review pending applications and mark them verified or rejected with a reason.
 
 **For anyone evaluating the product**

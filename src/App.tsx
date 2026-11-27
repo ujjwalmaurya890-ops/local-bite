@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -86,6 +86,7 @@ export default function App() {
   const [localityResults, setLocalityResults] = useState<LocalitySuggestion[]>([]);
   const [localitySearching, setLocalitySearching] = useState(false);
   const [localitySearchError, setLocalitySearchError] = useState<string | null>(null);
+  const localitySearchSequence = useRef(0);
 
   // Discovery State
   const [radiusKm, setRadiusKm] = useState<number>(3);
@@ -217,19 +218,27 @@ export default function App() {
   async function handleLocalitySearch(query: string) {
     setLocalityQuery(query);
     setLocalitySearchError(null);
+    const requestSequence = ++localitySearchSequence.current;
     if (query.trim().length < 2) {
       setLocalityResults([]);
+      setLocalitySearching(false);
       return;
     }
     setLocalitySearching(true);
     try {
       const rows = await searchLocality(query);
-      setLocalityResults(rows);
+      if (requestSequence === localitySearchSequence.current) {
+        setLocalityResults(rows);
+      }
     } catch {
-      setLocalitySearchError('Could not reach locality search service. Please try again.');
-      setLocalityResults([]);
+      if (requestSequence === localitySearchSequence.current) {
+        setLocalitySearchError('Could not reach locality search service. Please try again.');
+        setLocalityResults([]);
+      }
     } finally {
-      setLocalitySearching(false);
+      if (requestSequence === localitySearchSequence.current) {
+        setLocalitySearching(false);
+      }
     }
   }
 
@@ -312,7 +321,9 @@ export default function App() {
     setCart((prev) =>
       prev
         .map((c) =>
-          c.item.item_id === itemId ? { ...c, quantity: c.quantity + delta } : c
+          c.item.item_id === itemId
+            ? { ...c, quantity: Math.min(25, c.quantity + delta) }
+            : c
         )
         .filter((c) => c.quantity > 0)
     );

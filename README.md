@@ -65,7 +65,7 @@ See [ABOUT.md](./ABOUT.md) for the longer product story, design principles and t
 
 ### Admin (verifier) portal
 
-- First-run **admin passcode claim**, or a passcode supplied through `ADMIN_PASSCODE`.
+- Operator-controlled admin setup: a fixed `ADMIN_PASSCODE`, or a one-time claim protected by server-only `ADMIN_BOOTSTRAP_TOKEN`.
 - Review pending vendor applications and mark them **verified** or **rejected** with a reason.
 
 ### Safety & privacy details baked in
@@ -163,14 +163,14 @@ Open <http://localhost:3000>.
 
 1. **Location** — allow browser geolocation, or search a locality such as `Jagatpura, Jaipur`.
 2. **Discovery** — if no verified partner is nearby yet, the directory tab still shows real OSM food places. Enable **Demo Sandbox** on Home to test menus, cart and checkout end-to-end.
-3. **Admin** — open the verifier portal; the first visit offers to *claim* an admin passcode (min 6 characters).
+3. **Admin** — set `ADMIN_PASSCODE`, or configure `ADMIN_BOOTSTRAP_TOKEN` and share it with the trusted operator. The first claim requires that token and a passcode of at least 12 characters.
 4. **Vendor** — register a shop as a vendor, then approve it from the admin portal, then order from it as a customer.
 
 ### First build / production run
 
 ```bash
 npm run build           # builds the client into dist/
-NODE_ENV=production DATA_DIR=... npm start
+NODE_ENV=production DATA_DIR=/path/to/persistent/localbite-data npm start
 ```
 
 In production mode the Express server serves `dist/` and does **not** start Vite. Read [Deployment notes](#deployment-notes) before putting this on a host with an ephemeral filesystem.
@@ -185,12 +185,12 @@ Copy `.env.example` to `.env` (`.env*` is git-ignored).
 | --- | --- | --- |
 | `PORT` | `3000` | Port the Express server binds to (`0.0.0.0`). |
 | `SESSION_SECRET` | random per boot | HMAC key for bearer tokens. **Set this in any real deployment**, otherwise every restart invalidates all sessions. |
-| `ADMIN_PASSCODE` | _(empty)_ | Admin passcode checked against the env value. When empty and no passcode has been claimed, the first visitor to the admin portal can claim one. |
+| `ADMIN_PASSCODE` | _(empty)_ | Optional fixed admin passcode. When set, first-run claim is disabled. |
+| `ADMIN_BOOTSTRAP_TOKEN` | _(empty)_ | Required one-time secret for claiming the initial admin passcode when `ADMIN_PASSCODE` is empty. Keep it private and remove it after setup. The claim passcode must be at least 12 characters. |
+| `DATA_DIR` | `.data` | Directory for the JSON database. Use a persistent local volume in deployments. |
 | `NODE_ENV` | — | `production` serves `dist/` instead of running Vite middleware. |
 | `DISABLE_HMR` | — | `true` disables Vite HMR and file watching (used by hosted editor environments). |
-| `APP_URL` | — | Declared in `.env.example` for hosted-environment compatibility; **not currently read by the server**. |
-
-> Note: `DATA_DIR` is described above as an example of a production run, but the current server hardcodes `.data` under the process working directory (`server.ts`). Making it configurable is on the roadmap.
+| `APP_URL` | — | Retained for hosted-environment compatibility; **not currently read by the server**. |
 
 ---
 
@@ -200,12 +200,13 @@ Copy `.env.example` to `.env` (`.env*` is git-ignored).
 | --- | --- |
 | `npm run dev` | Runs `tsx server.ts` — Express + Vite middleware with HMR on port 3000. |
 | `npm run build` | `vite build` → `dist/` (a small plugin also copies `src/assets` so `/src/assets/...` image URLs resolve in production). |
+| `npm test` | Runs the utility and order/admin-rule tests using `node:test` through `tsx`. |
 | `npm run preview` | `vite preview` — serves the built **client only**; `/api/*` will 404. |
 | `npm start` | `node server.ts` — production-style start (run `npm run build` and set `NODE_ENV=production` first). |
 | `npm run lint` | `tsc --noEmit` type-check across the repo. |
 | `npm run clean` | Removes `dist/` and a legacy `server.js`. |
 
-There is currently **no `test` script**; see [Testing](#testing).
+
 
 ---
 
@@ -239,8 +240,8 @@ All request and response bodies are JSON. Authenticated routes expect `Authoriza
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| `GET` | `/api/admin/bootstrap-status` | `{ is_configured, requires_claim }` — public, used to decide claim vs sign-in. |
-| `POST` | `/api/admin/claim` | One-time passcode claim; 409 once configured. |
+| `GET` | `/api/admin/bootstrap-status` | `{ is_configured, requires_claim, bootstrap_available }` — public, used to decide claim vs sign-in. |
+| `POST` | `/api/admin/claim` | `{ passcode, bootstrap_token }` — one-time claim; requires the server-configured token and a 12+ character passcode; 409 once configured. |
 | `POST` | `/api/admin/login` | `{ passcode }` → admin token. |
 | `GET` | `/api/admin/vendors` | Admin only; all vendors including pending. |
 | `PATCH` | `/api/admin/vendors/:vendorId/verify` | `{ status: verified \| rejected \| pending_verification, rejection_reason? }`. |
@@ -330,19 +331,13 @@ Verified listings win de-duplication against OSM records when they match on `osm
 
 ## Testing
 
-Current state: a single test file, `src/utils/geo.test.ts`, covering the haversine distance, `formatDistance`, OSM de-duplication, opening-hours evaluation, search/filter behaviour and URL safety. It uses `node:test` and passes:
+Tests cover `src/utils/geo.ts` (distance, de-duplication, hours, filters, URL safety), order fulfillment and status-transition rules, and bootstrap-token matching. They use `node:test` and run with:
 
 ```bash
-npx tsx --test src/utils/geo.test.ts
-# 6 tests, 6 pass
+npm test
 ```
 
-Two caveats worth knowing:
-
-- There is **no `test` script** in `package.json`, and no CI, so these tests are not run automatically.
-- Running the file with plain `node --test src/utils/geo.test.ts` fails with `ERR_MODULE_NOT_FOUND`, because the test imports `'./geo'` without a `.ts` extension and Node's type stripping does not resolve extensionless specifiers.
-
-There are no tests yet for the Express routes (auth, ownership checks, order pricing, promo handling), the auth token helpers, or the React screens.
+GitHub Actions runs typechecking, this test suite and the production build. Full Express route integration tests and React component tests remain worthwhile additions.
 
 ---
 
@@ -357,32 +352,32 @@ The app is a single Node process that writes to a local JSON file, which constra
 Checklist for a real deployment:
 
 1. Set `SESSION_SECRET` (32+ random bytes) — without it, tokens break on every restart.
-2. Set `ADMIN_PASSCODE`, or claim the admin passcode immediately after the first boot: `POST /api/admin/claim` is open to anyone while both the env value and the stored hash are empty.
+2. Set `ADMIN_PASSCODE`, or configure a high-entropy `ADMIN_BOOTSTRAP_TOKEN` before first run and give it only to the trusted operator. `/api/admin/claim` rejects requests without that token and requires a 12+ character passcode. Remove the bootstrap token once setup is complete.
 3. Run `npm run build`, then start with `NODE_ENV=production`.
 4. Put the process behind HTTPS; bearer tokens are sent in headers.
-5. Back up `.data/localbite-db.json` (or move to a real database) — it holds users, orders and reviews.
+5. Set `DATA_DIR` to a persistent directory and back up `localbite-db.json` — it holds users, orders and reviews.
 
 ---
 
 ## Known limitations
 
-- **File-backed storage.** `server.ts` reads/writes the entire JSON database synchronously per mutation, with no locking; it is fine for a demo or small single-node pilot, not for concurrent production traffic.
+- **File-backed storage.** `server.ts` reads/writes the entire JSON database synchronously per mutation, with no locking; it is fine for a demo or small single-node pilot, not for concurrent production traffic. `DATA_DIR` is configurable, but the directory must be persistent.
 - **In-memory session tokens.** `src/services/apiClient.ts` keeps the bearer token in a module variable, so a page refresh logs the user out.
 - **No password reset or email verification**, and no logout/token revocation on the server.
-- **No rate limiting** on login, registration or the OSM proxy routes (which fan out to third-party APIs).
+- **Process-local rate limits.** Auth and public location/discovery endpoints have basic in-memory limits; deploy multiple instances only with a shared rate limiter. Nominatim requests are serialized and spaced, but production-scale use should use a hosted geocoding provider or self-hosted OSM service.
 - **Zero-vendor bootstrap.** If OpenStreetMap is unreachable and no partner is verified nearby, discovery is empty apart from the Demo Sandbox.
 - **No URL routing.** All 22 screens are `useState` values in `App.tsx`, so screens are not linkable and the browser back button does not navigate.
 - **`npm install` fails** on the `esbuild` peer conflict described in [Getting started](#getting-started); the repo assumes bun.
 - **Unoptimised images.** The four bundled JPEGs total ~4 MB and are served without resizing or lazy loading.
-- **Test coverage** is limited to `src/utils/geo.ts`, with no CI.
+- **Test coverage** covers shared utility rules but not full Express route or React behavior.
 
 ## Roadmap
 
-- Replace the JSON file with SQLite/Postgres behind a repository interface, and make `DATA_DIR` / `DATABASE_URL` configurable.
-- Persist the auth token safely, add refresh + logout, password reset and email verification, plus per-IP rate limits.
+- Replace the JSON file with SQLite/Postgres behind a repository interface, and support `DATABASE_URL`.
+- Persist the auth token safely, add refresh + logout, password reset and email verification, plus shared distributed rate limits.
 - Full URL routing (`/vendor/:id`, `/orders/:id`) with deep links and shareable menus.
 - Code-split Leaflet and the vendor portal out of the main bundle; convert images to WebP/AVIF with `loading="lazy"`.
-- Server-side tests (supertest + `node:test`) for auth, ownership, order pricing and verification, plus a GitHub Actions workflow running typecheck + tests + build.
+- Expand server-side integration tests (auth, ownership, order pricing and verification) and React component tests.
 - Vendor verification improvements (document upload, OSM ID validation), order cancellation, delivery fees and printable receipts.
 
 ---

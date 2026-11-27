@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   Calendar,
@@ -89,6 +89,19 @@ export const OrderFlow: React.FC<OrderFlowProps> = ({
   const [feedbackComment, setFeedbackComment] = useState('');
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const vendor = cart[0]?.vendor;
+    if (!vendor) return;
+    if (fulfillment === 'pickup' && !vendor.supports_pickup) {
+      setFulfillment(vendor.supports_delivery ? 'delivery' : 'pickup');
+    } else if (fulfillment === 'delivery' && !vendor.supports_delivery) {
+      setFulfillment(vendor.supports_pickup ? 'pickup' : 'delivery');
+    }
+  }, [cart, fulfillment]);
+
+  const supportsAnyFulfillment = Boolean(
+    cart[0]?.vendor.supports_pickup || cart[0]?.vendor.supports_delivery
+  );
   const subtotal = cart.reduce((s, c) => s + c.item.price_inr * c.quantity, 0);
   const matchedOffer = cart[0]?.vendor.offers?.find(
     (o) =>
@@ -427,8 +440,9 @@ export const OrderFlow: React.FC<OrderFlowProps> = ({
                     <button
                       type="button"
                       aria-label={`Increase quantity of ${c.item.name}`}
+                      disabled={c.quantity >= 25}
                       onClick={() => onUpdateCartQty(c.item.item_id, 1)}
-                      className="w-9 h-9 rounded-lg bg-[#245C46] text-white flex items-center justify-center cursor-pointer"
+                      className="w-9 h-9 rounded-lg bg-[#245C46] text-white flex items-center justify-center cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <Plus className="w-4 h-4" />
                     </button>
@@ -536,21 +550,30 @@ export const OrderFlow: React.FC<OrderFlowProps> = ({
           <div className="p-4 rounded-2xl bg-white border border-[#292929]/10 space-y-3">
             <p className="text-xs font-semibold text-[#292929]/70">Fulfillment Option</p>
             <div className="grid grid-cols-2 gap-2">
-              {(['pickup', 'delivery'] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setFulfillment(mode)}
-                  className={`min-h-[42px] py-2 rounded-xl text-xs font-semibold capitalize border cursor-pointer ${
-                    fulfillment === mode
-                      ? 'bg-[#245C46] text-white border-[#245C46]'
-                      : 'bg-[#FFF8EF] border-[#292929]/12 text-[#292929]'
-                  }`}
-                >
-                  {mode}
-                </button>
-              ))}
+              {(['pickup', 'delivery'] as const)
+                .filter((mode) => mode === 'pickup'
+                  ? cart[0]?.vendor.supports_pickup
+                  : cart[0]?.vendor.supports_delivery)
+                .map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setFulfillment(mode)}
+                    className={`min-h-[42px] py-2 rounded-xl text-xs font-semibold capitalize border cursor-pointer ${
+                      fulfillment === mode
+                        ? 'bg-[#245C46] text-white border-[#245C46]'
+                        : 'bg-[#FFF8EF] border-[#292929]/12 text-[#292929]'
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
             </div>
+            {!supportsAnyFulfillment && (
+              <p role="alert" className="text-xs text-red-700">
+                This shop has not configured pickup or delivery. Please contact the vendor.
+              </p>
+            )}
             {fulfillment === 'delivery' && (
               <input
                 value={deliveryAddress}
@@ -578,8 +601,8 @@ export const OrderFlow: React.FC<OrderFlowProps> = ({
 
           <button
             type="submit"
-            disabled={placingOrder}
-            className="w-full min-h-[46px] py-3 rounded-xl bg-[#F28C38] text-white font-semibold tabular-nums cursor-pointer disabled:opacity-60"
+            disabled={placingOrder || !supportsAnyFulfillment}
+            className="w-full min-h-[46px] py-3 rounded-xl bg-[#F28C38] text-white font-semibold tabular-nums cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {placingOrder ? 'Placing Order...' : `Confirm Order · ₹${total}`}
           </button>
