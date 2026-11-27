@@ -49,15 +49,17 @@ export const api = {
   },
 
   getAdminBootstrapStatus() {
-    return apiRequest<{ is_configured: boolean; requires_claim: boolean }>(
-      '/api/admin/bootstrap-status'
-    );
+    return apiRequest<{
+      is_configured: boolean;
+      requires_claim: boolean;
+      bootstrap_available: boolean;
+    }>('/api/admin/bootstrap-status');
   },
 
-  claimAdmin(passcode: string) {
+  claimAdmin(passcode: string, bootstrapToken: string) {
     return apiRequest<{ token: string; user: AuthUser }>('/api/admin/claim', {
       method: 'POST',
-      body: JSON.stringify({ passcode }),
+      body: JSON.stringify({ passcode, bootstrap_token: bootstrapToken }),
     });
   },
 

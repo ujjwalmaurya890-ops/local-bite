@@ -15,6 +15,8 @@ import type {
   StructuredOpeningHours,
   Vendor,
 } from './src/types.ts';
+import { matchesBootstrapToken } from './src/utils/adminBootstrap.ts';
+import { canTransitionOrder, validateFulfillment } from './src/utils/orderRules.ts';
 import {
   evaluateStructuredHours,
   haversineDistanceKm,
@@ -30,7 +32,48 @@ const SESSION_SECRET =
 const OSM_USER_AGENT =
   'LocalBiteApp/1.0 (Local Food Discovery Platform; contact@localbite.local)';
 
-const DATA_DIR = path.resolve(process.cwd(), '.data');
+let nominatimQueue: Promise<void> = Promise.resolve();
+function fetchNominatim(url: string, init: RequestInit = {}) {
+  const request = nominatimQueue.then(async () => {
+    const startedAt = Date.now();
+    try {
+      return await fetch(url, {
+        ...init,
+        signal: AbortSignal.timeout(8000),
+      });
+    } finally {
+      const remainingDelay = Math.max(0, 1100 - (Date.now() - startedAt));
+      await new Promise((resolve) => setTimeout(resolve, remainingDelay));
+    }
+  });
+  nominatimQueue = request.then(() => undefined, () => undefined);
+  return request;
+}
+
+function rateLimit(maxRequests: number, windowMs: number) {
+  const hits = new Map<string, { count: number; resetAt: number }>();
+  return (req: Request, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    const key = req.ip || req.socket.remoteAddress || 'unknown';
+    let entry = hits.get(key);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + windowMs };
+      hits.set(key, entry);
+    }
+    entry.count += 1;
+    if (entry.count > maxRequests) {
+      res.setHeader('Retry-After', String(Math.ceil((entry.resetAt - now) / 1000)));
+      res.status(429).json({ error: 'Too many requests. Please try again later.' });
+      return;
+    }
+    if (hits.size > 10_000) {
+      for (const [client, value] of hits) if (value.resetAt <= now) hits.delete(client);
+    }
+    next();
+  };
+}
+
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.resolve(process.cwd(), '.data'));
 const DB_FILE = path.resolve(DATA_DIR, 'localbite-db.json');
 
 interface StoredUser {
@@ -280,44 +323,30 @@ async function fetchFromNominatimBox(
     lng + dLng
   ).toFixed(5)},${(lat - dLat).toFixed(5)}`;
 
-  const terms = [
-    { q: 'restaurant', fallbackCat: 'Restaurant' },
-    { q: 'cafe', fallbackCat: 'Cafe' },
-    { q: 'fast food', fallbackCat: 'Fast Food' },
-    { q: 'bakery', fallbackCat: 'Bakery' },
-  ];
-
-  const responses = await Promise.allSettled(
-    terms.map(async ({ q, fallbackCat }) => {
-      const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(
-        q
-      )}&viewbox=${encodeURIComponent(viewbox)}&bounded=1&addressdetails=1&limit=12`;
-      const res = await fetch(url, {
-        headers: { 'User-Agent': OSM_USER_AGENT, 'Accept-Language': 'en' },
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!res.ok) return [];
-      const rows = (await res.json()) as Array<{
-        osm_type?: string;
-        osm_id?: number;
-        place_id: number;
-        lat: string;
-        lon: string;
-        name?: string;
-        type?: string;
-        display_name?: string;
-        address?: Record<string, string>;
-      }>;
-      return rows.map((r) => ({ r, fallbackCat }));
-    })
-  );
+  // Nominatim is a fallback only. Keep this to one request and serialize all
+  // Nominatim traffic through fetchNominatim to respect its public-service policy.
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=food&viewbox=${encodeURIComponent(viewbox)}&bounded=1&addressdetails=1&limit=30`;
+  const response = await fetchNominatim(url, {
+    headers: { 'User-Agent': OSM_USER_AGENT, 'Accept-Language': 'en' },
+  });
+  if (!response.ok) return [];
+  const rows = (await response.json()) as Array<{
+    osm_type?: string;
+    osm_id?: number;
+    place_id: number;
+    lat: string;
+    lon: string;
+    name?: string;
+    type?: string;
+    display_name?: string;
+    address?: Record<string, string>;
+  }>;
+  const results = rows.map((r) => ({ r, fallbackCat: 'Food' }));
 
   const seenIds = new Set<string>();
   const vendors: Vendor[] = [];
 
-  for (const result of responses) {
-    if (result.status !== 'fulfilled') continue;
-    for (const { r, fallbackCat } of result.value) {
+  for (const { r, fallbackCat } of results) {
       const name = (r.name || '').trim();
       if (!name) continue;
       const vLat = Number(r.lat);
@@ -368,7 +397,6 @@ async function fetchFromNominatimBox(
         supports_delivery: false,
         photo_urls: [],
       });
-    }
   }
 
   return vendors;
@@ -425,10 +453,11 @@ async function fetchRealNearbyFoodFromOverpass(
     })
   ).catch(() => null);
 
-  const [overpassElements, nominatimVendors] = await Promise.all([
-    overpassPromise,
-    fetchFromNominatimBox(lat, lng, radiusKm).catch(() => [] as Vendor[]),
-  ]);
+  const overpassElements = await overpassPromise;
+  const nominatimVendors =
+    !overpassElements || overpassElements.length === 0
+      ? await fetchFromNominatimBox(lat, lng, radiusKm).catch(() => [] as Vendor[])
+      : [];
 
   if (!overpassElements && nominatimVendors.length === 0) {
     throw new Error('Live OpenStreetMap directory is temporarily unreachable');
@@ -495,6 +524,8 @@ async function fetchRealNearbyFoodFromOverpass(
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
+  app.use(['/api/auth/login', '/api/auth/register', '/api/admin/login', '/api/admin/claim'], rateLimit(10, 15 * 60_000));
+  app.use(['/api/location/reverse', '/api/location/search', '/api/vendors/nearby'], rateLimit(30, 60_000));
 
   // ---------------------------------------------------------------------------
   // 1. REAL LOCATION SERVICES (Server-side Nominatim Proxy + Cache)
@@ -518,9 +549,8 @@ async function startServer() {
       const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
         lat
       )}&lon=${encodeURIComponent(lng)}&addressdetails=1`;
-      const response = await fetch(url, {
+      const response = await fetchNominatim(url, {
         headers: { 'User-Agent': OSM_USER_AGENT, 'Accept-Language': 'en' },
-        signal: AbortSignal.timeout(8000),
       });
       if (!response.ok) {
         throw new Error(`Reverse geocode HTTP ${response.status}`);
@@ -582,9 +612,8 @@ async function startServer() {
       const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(
         q
       )}&countrycodes=in&addressdetails=1&limit=7`;
-      const response = await fetch(url, {
+      const response = await fetchNominatim(url, {
         headers: { 'User-Agent': OSM_USER_AGENT, 'Accept-Language': 'en' },
-        signal: AbortSignal.timeout(8000),
       });
       if (!response.ok) {
         throw new Error(`Locality search HTTP ${response.status}`);
@@ -789,24 +818,31 @@ async function startServer() {
     const envPasscode = (process.env.ADMIN_PASSCODE || '').trim();
     const configuredViaEnv = envPasscode.length > 0;
     const claimedInDb = Boolean(db.admin_passcode_hash);
+    const bootstrapAvailable = (process.env.ADMIN_BOOTSTRAP_TOKEN || '').length > 0;
     res.json({
       is_configured: configuredViaEnv || claimedInDb,
-      requires_claim: !configuredViaEnv && !claimedInDb,
+      requires_claim: !configuredViaEnv && !claimedInDb && bootstrapAvailable,
+      bootstrap_available: bootstrapAvailable,
     });
   });
 
   app.post('/api/admin/claim', (req, res) => {
     const envPasscode = (process.env.ADMIN_PASSCODE || '').trim();
+    const bootstrapToken = process.env.ADMIN_BOOTSTRAP_TOKEN || '';
     if (envPasscode.length > 0 || db.admin_passcode_hash) {
       res.status(409).json({
         error: 'Admin passcode is already configured. Please sign in.',
       });
       return;
     }
-    const { passcode } = req.body as { passcode?: string };
-    if (!passcode || passcode.trim().length < 6) {
+    const { passcode, bootstrap_token } = req.body as { passcode?: string; bootstrap_token?: string };
+    if (!bootstrapToken || !matchesBootstrapToken(bootstrapToken, bootstrap_token)) {
+      res.status(403).json({ error: 'A valid server-configured bootstrap token is required.' });
+      return;
+    }
+    if (!passcode || passcode.trim().length < 12) {
       res.status(400).json({
-        error: 'Choose an admin passcode of at least 6 characters.',
+        error: 'Choose an admin passcode of at least 12 characters.',
       });
       return;
     }
@@ -1243,6 +1279,10 @@ async function startServer() {
         res.status(400).json({ error: 'Invalid order status' });
         return;
       }
+      if (!canTransitionOrder(order.status, nextStatus)) {
+        res.status(409).json({ error: `Order cannot transition from ${order.status} to ${nextStatus}` });
+        return;
+      }
       order.status = nextStatus;
       order.updated_at = new Date().toISOString();
       saveDb(db);
@@ -1307,6 +1347,12 @@ async function startServer() {
       return;
     }
 
+    const fulfillmentError = validateFulfillment(vendor, fulfillment, delivery_address);
+    if (fulfillmentError) {
+      res.status(400).json({ error: fulfillmentError });
+      return;
+    }
+
     if (!Array.isArray(items) || items.length === 0) {
       res.status(400).json({ error: 'Order must contain at least one item' });
       return;
@@ -1349,7 +1395,7 @@ async function startServer() {
 
     const total = Math.max(subtotal - discount, 0);
     const order: Order = {
-      order_id: `LB-${Math.floor(100000 + Math.random() * 900000)}`,
+      order_id: `LB-${crypto.randomUUID()}`,
       customer_id: req.user!.id,
       customer_name: req.user!.full_name,
       vendor_id: vendor.vendor_id,
