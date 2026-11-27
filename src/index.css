@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: #FFF8EF;
+    color: #292929;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Leaflet map container stacking safety */
+.leaflet-container {
+  font-family: 'Inter', sans-serif;
+  z-index: 0;
+}

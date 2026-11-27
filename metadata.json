@@ -1,0 +1,6 @@
+{
+  "name": "LocalBite",
+  "description": "Discover. Order. Enjoy Local Food. Location-based local food discovery and ordering platform for Jagatpura, Jaipur and across India.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": []
+}
